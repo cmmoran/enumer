@@ -191,6 +191,7 @@ name := MyTypeValue.String() // name => "my_type_value"
 - first-lower (same as first only lower case)
 - first-upper (same as first only upper case)
 - whitespace
+- map:K0=V0,K1=V1,K2=V2... (map Keys to Values for each element in the enum)
 
 ## How to use
 

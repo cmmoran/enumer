@@ -10,7 +10,6 @@ package main
 
 import (
 	"bytes"
-	jsone "encoding/json"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -19,7 +18,6 @@ import (
 	"go/importer"
 	"go/token"
 	"go/types"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -61,6 +59,7 @@ var (
 	output          = flag.String("output", "", "output file name; default srcdir/<type>_string.go")
 	transformMethod = flag.String("transform", "noop", "enum item name transformation method. Default: noop")
 	trimPrefix      = flag.String("trimprefix", "", "transform each item name by removing a prefix. Default: \"\"")
+	trimSuffix      = flag.String("trimsuffix", "", "transform each item name by removing a suffix. Default: \"\"")
 	addPrefix       = flag.String("addprefix", "", "transform each item name by adding a prefix. Default: \"\"")
 	linecomment     = flag.Bool("linecomment", false, "use line comment text as printed text when present")
 )
@@ -149,7 +148,7 @@ func main() {
 
 	// Run generate for each type.
 	for _, typeName := range typs {
-		g.generate(typeName, *json, *yaml, *sql, *text, *gqlgen, *transformMethod, *trimPrefix, *addPrefix, *linecomment, *altValuesFunc)
+		g.generate(typeName, *json, *yaml, *sql, *text, *gqlgen, *transformMethod, *trimPrefix, *trimSuffix, *addPrefix, "", *linecomment, *altValuesFunc)
 	}
 
 	// Format the output.
@@ -163,17 +162,17 @@ func main() {
 	}
 
 	// Write to tmpfile first
-	tmpFile, err := ioutil.TempFile(dir, fmt.Sprintf("%s_enumer_", typs[0]))
+	tmpFile, err := os.CreateTemp(dir, fmt.Sprintf("%s_enumer_", typs[0]))
 	if err != nil {
 		log.Fatalf("creating temporary file for output: %s", err)
 	}
 	_, err = tmpFile.Write(src)
 	if err != nil {
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
 		log.Fatalf("writing output: %s", err)
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	// Rename tmpfile to output file
 	err = os.Rename(tmpFile.Name(), outputName)
@@ -392,7 +391,15 @@ func (g *Generator) transformValueNames(values []Value, transformMethods string)
 		if strings.HasPrefix(transform, "map:") {
 			customTransform := strings.TrimPrefix(transform, "map:")
 			m := make(map[string]string)
-			_ = jsone.Unmarshal([]byte(customTransform), &m)
+			kvs := strings.Split(customTransform, ",")
+			for _, kv := range kvs {
+				parts := strings.SplitN(kv, "=", 2)
+				if len(parts) != 2 {
+					log.Fatalf("invalid map transform method: %s", transform)
+				}
+				m[parts[0]] = parts[1]
+			}
+			//_ = jsone.Unmarshal([]byte(customTransform), &m)
 			mapMethods = append(mapMethods, func(s string) string {
 				if v, ok := m[s]; ok {
 					return v
@@ -495,10 +502,21 @@ func (g *Generator) transformValueNames(values []Value, transformMethods string)
 	}
 }
 
-// trimValueNames removes a prefix from each name
-func (g *Generator) trimValueNames(values []Value, prefix string) {
+// trimValueNamesPrefix removes a prefix from each name
+func (g *Generator) trimValueNamesPrefix(values []Value, prefix string) {
 	for i := range values {
-		values[i].name = strings.TrimPrefix(values[i].name, prefix)
+		if len(prefix) > 0 && strings.HasPrefix(values[i].name, prefix) {
+			values[i].name = strings.TrimPrefix(values[i].name, prefix)
+		}
+	}
+}
+
+// trimValueNamesSuffix removes a suffix from each name
+func (g *Generator) trimValueNamesSuffix(values []Value, suffix string) {
+	for i := range values {
+		if len(suffix) > 0 && strings.HasSuffix(values[i].name, suffix) {
+			values[i].name = strings.TrimSuffix(values[i].name, suffix)
+		}
 	}
 }
 
@@ -509,10 +527,20 @@ func (g *Generator) prefixValueNames(values []Value, prefix string) {
 	}
 }
 
+// suffixValueNames adds a suffix to each name
+func (g *Generator) suffixValueNames(values []Value, suffix string) {
+	for i := range values {
+		values[i].name = values[i].name + suffix
+	}
+}
+
 // generate produces the String method for the named type.
-func (g *Generator) generate(typeName string,
+func (g *Generator) generate(
+	typeName string,
 	includeJSON, includeYAML, includeSQL, includeText, includeGQLGen bool,
-	transformMethod string, trimPrefix string, addPrefix string, lineComment bool, includeValuesMethod bool) {
+	transformMethod, trimPrefix, trimSuffix, addPrefix, addSuffix string,
+	lineComment, includeValuesMethod bool,
+) {
 	values := make([]Value, 0, 100)
 	for _, file := range g.pkg.files {
 		file.lineComment = lineComment
@@ -530,12 +558,18 @@ func (g *Generator) generate(typeName string,
 	}
 
 	for _, prefix := range strings.Split(trimPrefix, ",") {
-		g.trimValueNames(values, prefix)
+		g.trimValueNamesPrefix(values, prefix)
+	}
+
+	for _, suffix := range strings.Split(trimSuffix, ",") {
+		g.trimValueNamesSuffix(values, suffix)
 	}
 
 	g.transformValueNames(values, transformMethod)
 
 	g.prefixValueNames(values, addPrefix)
+
+	g.suffixValueNames(values, addSuffix)
 
 	runs := splitIntoRuns(values)
 	// The decision of which pattern to use depends on the number of

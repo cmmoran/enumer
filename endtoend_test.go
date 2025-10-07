@@ -4,6 +4,7 @@
 
 // go command is not available on android
 
+//go:build !android
 // +build !android
 
 package main
@@ -12,7 +13,6 @@ import (
 	"fmt"
 	"go/build"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,7 +40,7 @@ func init() {
 // binary panics if the String method for X is not correct, including for error cases.
 
 func TestEndToEnd(t *testing.T) {
-	dir, err := ioutil.TempDir("", "stringer")
+	dir, err := os.MkdirTemp("", "stringer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +77,9 @@ func TestEndToEnd(t *testing.T) {
 		var transformNameMethod string
 
 		switch name {
+		case "transform_map.go":
+			typeName = "MapValue"
+			transformNameMethod = `map:Male=XY,Female=XX,Unknown=XX|XY`
 		case "transform_snake.go":
 			typeName = "SnakeCaseValue"
 			transformNameMethod = "snake"
