@@ -51,6 +51,7 @@ func (af *arrayFlags) Set(value string) error {
 var (
 	typeNames       = flag.String("type", "", "comma-separated list of type names; must be set")
 	sql             = flag.Bool("sql", false, "if true, the Scanner and Valuer interface will be implemented.")
+	sqlint          = flag.Bool("sql:int", false, "if true, the Scanner and Valuer interface will be implemented and Value() returns int")
 	json            = flag.Bool("json", false, "if true, json marshaling methods will be generated. Default: false")
 	yaml            = flag.Bool("yaml", false, "if true, yaml marshaling methods will be generated. Default: false")
 	text            = flag.Bool("text", false, "if true, text marshaling methods will be generated. Default: false")
@@ -61,6 +62,7 @@ var (
 	trimPrefix      = flag.String("trimprefix", "", "transform each item name by removing a prefix. Default: \"\"")
 	trimSuffix      = flag.String("trimsuffix", "", "transform each item name by removing a suffix. Default: \"\"")
 	addPrefix       = flag.String("addprefix", "", "transform each item name by adding a prefix. Default: \"\"")
+	addSuffix       = flag.String("addsuffix", "", "transform each item name by adding a suffix. Default: \"\"")
 	linecomment     = flag.Bool("linecomment", false, "use line comment text as printed text when present")
 )
 
@@ -134,8 +136,14 @@ func main() {
 	g.Printf("import (\n")
 	g.Printf("\t\"fmt\"\n")
 	g.Printf("\t\"strings\"\n")
+	if *sqlint && !*sql {
+		*sql = true
+	}
 	if *sql {
 		g.Printf("\t\"database/sql/driver\"\n")
+		if !*gqlgen {
+			g.Printf("\t\"strconv\"\n")
+		}
 	}
 	if *json {
 		g.Printf("\t\"encoding/json\"\n")
@@ -148,7 +156,7 @@ func main() {
 
 	// Run generate for each type.
 	for _, typeName := range typs {
-		g.generate(typeName, *json, *yaml, *sql, *text, *gqlgen, *transformMethod, *trimPrefix, *trimSuffix, *addPrefix, "", *linecomment, *altValuesFunc)
+		g.generate(typeName, *json, *yaml, *sql, *text, *gqlgen, *sqlint, *transformMethod, *trimPrefix, *trimSuffix, *addPrefix, *addSuffix, *linecomment, *altValuesFunc)
 	}
 
 	// Format the output.
@@ -258,7 +266,7 @@ type Package struct {
 
 // parsePackage analyzes the single package constructed from the patterns and tags.
 // parsePackage exits if there is an error.
-func (g *Generator) parsePackage(patterns []string, tags []string) {
+func (g *Generator) parsePackage(patterns []string, _ []string) {
 	cfg := &packages.Config{
 		Mode: packages.LoadSyntax,
 		// TODO: Need to think about constants in test files. Maybe write type_string_test.go
@@ -537,7 +545,7 @@ func (g *Generator) suffixValueNames(values []Value, suffix string) {
 // generate produces the String method for the named type.
 func (g *Generator) generate(
 	typeName string,
-	includeJSON, includeYAML, includeSQL, includeText, includeGQLGen bool,
+	includeJSON, includeYAML, includeSQL, includeText, includeGQLGen, sqlint bool,
 	transformMethod, trimPrefix, trimSuffix, addPrefix, addSuffix string,
 	lineComment, includeValuesMethod bool,
 ) {
@@ -610,7 +618,7 @@ func (g *Generator) generate(
 		g.buildYAMLMethods(runs, typeName, runsThreshold)
 	}
 	if includeSQL {
-		g.addValueAndScanMethod(typeName)
+		g.addValueAndScanMethod(typeName, sqlint)
 	}
 	if includeGQLGen {
 		g.buildGQLGenMethods(runs, typeName)

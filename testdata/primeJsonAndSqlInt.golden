@@ -122,8 +122,25 @@ func (i Prime) IsAPrime() bool {
 	return ok
 }
 
+// MarshalJSON implements the json.Marshaler interface for Prime
+func (i Prime) MarshalJSON() ([]byte, error) {
+	return json.Marshal(i.String())
+}
+
+// UnmarshalJSON implements the json.Unmarshaler interface for Prime
+func (i *Prime) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("Prime should be a string, got %s", data)
+	}
+
+	var err error
+	*i, err = PrimeString(s)
+	return err
+}
+
 func (i Prime) Value() (driver.Value, error) {
-	return i.String(), nil
+	return int64(i), nil
 }
 
 func (i *Prime) Scan(value any) error {

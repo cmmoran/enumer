@@ -143,8 +143,26 @@ func (i Prime) Value() (driver.Value, error) {
 	return i.String(), nil
 }
 
-func (i *Prime) Scan(value interface{}) error {
+func (i *Prime) Scan(value any) error {
 	if value == nil {
+		return nil
+	}
+
+	switch v := value.(type) {
+	case int64:
+		*i = Prime(v)
+		return nil
+	case int32:
+		*i = Prime(v)
+		return nil
+	case int:
+		*i = Prime(v)
+		return nil
+	case float64:
+		*i = Prime(int64(v))
+		return nil
+	case float32:
+		*i = Prime(int64(v))
 		return nil
 	}
 
@@ -160,11 +178,15 @@ func (i *Prime) Scan(value interface{}) error {
 		return fmt.Errorf("invalid value of Prime: %[1]T(%[1]v)", value)
 	}
 
+	if n, err := strconv.ParseInt(strings.TrimSpace(str), 10, 64); err == nil {
+		*i = Prime(n)
+		return nil
+	}
+
 	val, err := PrimeString(str)
 	if err != nil {
 		return err
 	}
-
 	*i = val
 	return nil
 }
