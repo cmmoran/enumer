@@ -4,7 +4,7 @@ Enumer is a tool to generate Go code that adds useful methods to Go enums (const
 It started as a fork of [Rob Pike’s Stringer tool](https://godoc.org/golang.org/x/tools/cmd/stringer)
 maintained by [Álvaro López Espinosa](https://github.com/alvaroloes/enumer). 
 This was again forked as (https://github.com/dmarkham/enumer) picking up where Álvaro left off.
-And yet again this was forked here as (https://github.com/cmmoran/enumer) for my personal project needs. My intention is to submit PRs for my changes but current time constraints necessitate this current fork in lieu of waiting through a potentially long PR process.
+And yet again this was forked here as (https://github.com/cmmoran/enumer) for my personal project needs. My intention is to submit PRs for my changes but current time constraints require this current fork in lieu of waiting through a potentially long PR process.
 
 ```
 $ ./enumer --help
@@ -13,7 +13,7 @@ Usage of ./enumer:
         Enumer [flags] -type T [directory]
         Enumer [flags] -type T files... # Must be a single package
 For more information, see:
-        http://godoc.org/github.com/cmmoran/enumer
+        https://godoc.org/github.com/cmmoran/enumer
 Flags:
   -addprefix string
         transform each item name by adding a prefix. Default: ""
@@ -29,6 +29,8 @@ Flags:
         output file name; default srcdir/<type>_string.go
   -sql
         if true, the Scanner and Valuer interface will be implemented.
+  -sql:int
+        if true, the Scanner and Valuer interface will be implemented and Value() returns int
   -text
         if true, text marshaling methods will be generated. Default: false
   -transform string
@@ -70,6 +72,7 @@ When Enumer is applied to a type, it will generate:
   the enum conform to the `gopkg.in/yaml.v2.Marshaler` and `gopkg.in/yaml.v2.Unmarshaler` interfaces.
 - When the flag `sql` is provided, the methods for implementing the `Scanner` and `Valuer` interfaces.
   Useful when storing the enum in a database.
+- When the flag `sql:int` is provided, the generated `Scanner` and `Valuer` interfaces are still implemented, but `Value()` returns the enum's integer value as `int64` instead of its string representation.
 
 
 For example, if we have an enum type called `Pill`,
@@ -153,6 +156,167 @@ pillJSON := Aspirin.MarshalJSON()
 The generated code is exactly the same as the Stringer tool plus the mentioned additions, so you can use
 **Enumer** where you are already using **Stringer** without any code change.
 
+## Parse aliases from enum comments
+
+Enumer can extend the generated `<Type>String(s string)` parser with explicit aliases declared in enum comments.
+
+This is useful when an enum has one canonical string form for output, but should accept additional input spellings from CLI flags, config files, JSON payloads, or legacy APIs.
+
+Aliases are declared with a comment directive on the enum constant:
+
+```go
+type Status int
+
+const (
+	StatusOpen Status = iota //enumer:alias=opened,o
+	StatusClosed             //enumer:alias=closed,c
+)
+```
+
+With the definition above, all of the following resolve successfully:
+
+```go
+status, _ := StatusString("StatusOpen")
+status, _ = StatusString("statusopen")
+status, _ = StatusString("opened")
+status, _ = StatusString("O")
+```
+
+### Alias rules
+
+- Aliases are parse-only metadata. They affect `<Type>String(s string)` and any generated unmarshal methods that call it.
+- `String()` still returns the canonical enum string only.
+- `<Type>Strings()` still returns canonical strings only.
+- Aliases are matched the same way canonical strings are matched: exact first, then case-insensitive via lowercase lookup.
+- Aliases are explicit. They are not transformed by `-transform`, `-trimprefix`, `-trimsuffix`, `-addprefix`, or `-addsuffix`.
+
+### Directive syntax
+
+The directive format is:
+
+```go
+//enumer:alias=value0,value1,value2
+```
+
+Rules:
+
+- Aliases are comma-separated.
+- Surrounding whitespace is trimmed.
+- Empty aliases are invalid.
+- Alias directives may be placed in doc comments or line comments attached to the enum constant.
+
+Example with a doc comment:
+
+```go
+const (
+	//enumer:alias=running,wip
+	JobStateInProgress JobState = iota
+)
+```
+
+### Interaction with `-linecomment`
+
+When `-linecomment` is enabled, alias directives are treated as generator metadata and are ignored when deriving the canonical display string.
+
+Example:
+
+```go
+const (
+	StatusOpen Status = iota // Open //enumer:alias=opened,o
+	StatusClosed             //enumer:alias=closed,c
+)
+```
+
+With `-linecomment`:
+
+- `StatusOpen.String()` returns `"Open"`
+- `StatusClosed.String()` continues to use the identifier-derived canonical string because its line comment contains only alias metadata
+- `StatusString("opened")` and `StatusString("o")` still resolve to `StatusOpen`
+
+### Collision rules
+
+Enumer rejects any alias that collides with another parse token after normalization.
+
+The following collisions are invalid:
+
+- alias vs alias on different constants
+- alias vs canonical name of another constant
+- alias vs canonical lowercase name of another constant
+- duplicate aliases on the same constant after normalization
+
+Example:
+
+```go
+const (
+	StatusOpen Status = iota //enumer:alias=closed
+	StatusClosed
+)
+```
+
+This fails because `"closed"` would resolve to two different enum values after normalization.
+
+Enumer enforces this in two ways:
+
+- The generator validates parse-token collisions and fails with a descriptive error.
+- The generated `map[string]T` contains explicit alias entries, so duplicate keys still fail at compile time if validation ever misses a case.
+
+## SQL and `sql:int`
+
+The `sql` and `sql:int` flags both generate implementations of `database/sql.Scanner` and `database/sql/driver.Valuer`.
+
+The difference is the representation used by `Value()`:
+
+- `-sql` stores the enum as its canonical string form
+- `-sql:int` stores the enum as its numeric value converted to `int64`
+
+Conceptually, the generated `Value()` methods look like this:
+
+```go
+// with -sql
+func (i MyEnum) Value() (driver.Value, error) {
+	return i.String(), nil
+}
+
+// with -sql:int
+func (i MyEnum) Value() (driver.Value, error) {
+	return int64(i), nil
+}
+```
+
+The generated `Scan` method is flexible in both modes:
+
+- it accepts numeric database values such as `int64`, `int32`, `int`, `float64`, and `float32`
+- it accepts strings and byte slices
+- if given a string-like value, it first tries to parse it as an integer, then falls back to `<Type>String(...)`
+
+That means both modes can read either integer-like or string-like SQL values in many cases. The main distinction is what Enumer writes back through `Value()`.
+
+Use `-sql` when:
+
+- your database column stores symbolic enum names
+- you want values in the database to be human-readable
+- you want the database representation to stay aligned with `String()`
+
+Use `-sql:int` when:
+
+- your schema stores enum values as integers
+- you need compatibility with an existing numeric column
+- you want the database representation to match the underlying Go enum value directly
+
+Example:
+
+```go
+//go:generate go run github.com/cmmoran/enumer -type=Status -sql
+```
+
+or
+
+```go
+//go:generate go run github.com/cmmoran/enumer -type=Status -sql:int
+```
+
+In practice, choose one or the other based on the database representation you want to persist.
+
 ## Transforming the string representation of the enum value
 
 By default, Enumer uses the same name of the enum value for generating the string representation (usually CamelCase in Go).
@@ -191,7 +355,71 @@ name := MyTypeValue.String() // name => "my_type_value"
 - first-lower (same as first only lower case)
 - first-upper (same as first only upper case)
 - whitespace
-- map:K0=V0,K1=V1,K2=V2... (map Keys to Values for each element in the enum)
+- map:K0=V0,K1=V1,K2=V2... (map specific enum identifiers to explicit output values)
+
+### `map:` transform
+
+The `map:` transform lets you define exact output strings for specific enum constants instead of applying a generic case conversion.
+
+Syntax:
+
+```text
+-transform='map:Key0=Value0,Key1=Value1,Key2=Value2'
+```
+
+Each key must be the enum constant name after any `-trimprefix` and `-trimsuffix` processing, but before any `-addprefix` or `-addsuffix` processing.
+
+Example:
+
+```go
+type MapValue int
+
+const (
+	Male MapValue = iota
+	Female
+	Unknown
+)
+```
+
+Generation:
+
+```bash
+enumer -type=MapValue -transform='map:Male=XY,Female=XX,Unknown=XX|XY'
+```
+
+Result:
+
+```go
+Male.String()    // "XY"
+Female.String()  // "XX"
+Unknown.String() // "XX|XY"
+```
+
+Rules and behavior:
+
+- Keys must match the enum names exactly at the point the map transform runs.
+- Values are used exactly as written.
+- If a key is not present in the map, that enum name is left unchanged.
+- `map:` is a transform of the canonical output string. It affects `String()`, `<Type>Strings()`, marshaling output, and the canonical names accepted by `<Type>String(...)`.
+- Alias directives are separate. Use `//enumer:alias=...` if you want extra accepted parse inputs without changing canonical output.
+
+Ordering with other name transforms:
+
+- `-trimprefix` and `-trimsuffix` run before `map:`
+- `-addprefix` and `-addsuffix` run after `map:`
+
+That means this:
+
+```bash
+enumer -type=Status -trimprefix=Status -transform='map:Open=opened,Closed=closed'
+```
+
+expects the map keys `Open` and `Closed`, not `StatusOpen` and `StatusClosed`.
+
+Limitations:
+
+- The `map:` syntax does not provide escaping for `,` or `=`, so mapped values should not contain those characters.
+- `map:` is intended for explicit one-to-one renaming. If you want a general naming convention such as `snake` or `kebab`, use the corresponding built-in transform instead.
 
 ## How to use
 
@@ -201,12 +429,14 @@ For a module-aware repo with `enumer` in the `go.mod` file, generation can be ca
 //go:generate go run github.com/cmmoran/enumer -type=YOURTYPE
 ```
 
-There are four boolean flags: `json`, `text`, `yaml` and `sql`. You can use any combination of them (i.e. `enumer -type=Pill -json -text`),
+There are five optional generation flags: `json`, `text`, `yaml`, `sql`, and `sql:int`. You can use any combination that makes sense for your enum and storage format.
 
 For enum string representation transformation the `transform` and `trimprefix` flags
 were added (i.e. `enumer -type=MyType -json -transform=snake`).
 Possible transform values are listed above in the [transformers](#transformers) section.
 The default value for `transform` flag is `noop` which means no transformation will be performed.
+
+Alias directives are independent from the transform flags. The transform flags define the canonical output string, while `//enumer:alias=...` adds extra accepted input strings for parsing only.
 
 If a prefix is provided via the `trimprefix` flag, it will be trimmed from the start of each name (before
 it is transformed). If a name doesn't have the prefix it will be passed unchanged.

@@ -51,6 +51,7 @@ func (af *arrayFlags) Set(value string) error {
 var (
 	typeNames       = flag.String("type", "", "comma-separated list of type names; must be set")
 	sql             = flag.Bool("sql", false, "if true, the Scanner and Valuer interface will be implemented.")
+	sqlint          = flag.Bool("sql:int", false, "if true, the Scanner and Valuer interface will be implemented and Value() returns int")
 	json            = flag.Bool("json", false, "if true, json marshaling methods will be generated. Default: false")
 	yaml            = flag.Bool("yaml", false, "if true, yaml marshaling methods will be generated. Default: false")
 	text            = flag.Bool("text", false, "if true, text marshaling methods will be generated. Default: false")
@@ -61,6 +62,7 @@ var (
 	trimPrefix      = flag.String("trimprefix", "", "transform each item name by removing a prefix. Default: \"\"")
 	trimSuffix      = flag.String("trimsuffix", "", "transform each item name by removing a suffix. Default: \"\"")
 	addPrefix       = flag.String("addprefix", "", "transform each item name by adding a prefix. Default: \"\"")
+	addSuffix       = flag.String("addsuffix", "", "transform each item name by adding a suffix. Default: \"\"")
 	linecomment     = flag.Bool("linecomment", false, "use line comment text as printed text when present")
 )
 
@@ -134,8 +136,14 @@ func main() {
 	g.Printf("import (\n")
 	g.Printf("\t\"fmt\"\n")
 	g.Printf("\t\"strings\"\n")
+	if *sqlint && !*sql {
+		*sql = true
+	}
 	if *sql {
 		g.Printf("\t\"database/sql/driver\"\n")
+		if !*gqlgen {
+			g.Printf("\t\"strconv\"\n")
+		}
 	}
 	if *json {
 		g.Printf("\t\"encoding/json\"\n")
@@ -148,7 +156,7 @@ func main() {
 
 	// Run generate for each type.
 	for _, typeName := range typs {
-		g.generate(typeName, *json, *yaml, *sql, *text, *gqlgen, *transformMethod, *trimPrefix, *trimSuffix, *addPrefix, "", *linecomment, *altValuesFunc)
+		g.generate(typeName, *json, *yaml, *sql, *text, *gqlgen, *sqlint, *transformMethod, *trimPrefix, *trimSuffix, *addPrefix, *addSuffix, *linecomment, *altValuesFunc)
 	}
 
 	// Format the output.
@@ -258,7 +266,7 @@ type Package struct {
 
 // parsePackage analyzes the single package constructed from the patterns and tags.
 // parsePackage exits if there is an error.
-func (g *Generator) parsePackage(patterns []string, tags []string) {
+func (g *Generator) parsePackage(patterns []string, _ []string) {
 	cfg := &packages.Config{
 		Mode: packages.LoadSyntax,
 		// TODO: Need to think about constants in test files. Maybe write type_string_test.go
@@ -346,35 +354,56 @@ func getLocale() (string, string) {
 		cmd := exec.Command("powershell", "Get-Culture | select -exp Name")
 		output, err := cmd.Output()
 		if err == nil {
-			langLocRaw := strings.TrimSpace(string(output))
-			langLoc := strings.Split(langLocRaw, "-")
-			lang := langLoc[0]
-			loc := langLoc[1]
-			return lang, loc
+			if lang, loc, ok := splitLocale(strings.TrimSpace(string(output))); ok {
+				return lang, loc
+			}
 		}
 	case "darwin":
 		// Exec shell Get-Culture on MacOS.
 		cmd := exec.Command("sh", "osascript -e 'user locale of (get system info)'")
 		output, err := cmd.Output()
 		if err == nil {
-			langLocRaw := strings.TrimSpace(string(output))
-			langLoc := strings.Split(langLocRaw, "_")
-			lang := langLoc[0]
-			loc := langLoc[1]
-			return lang, loc
+			if lang, loc, ok := splitLocale(strings.TrimSpace(string(output))); ok {
+				return lang, loc
+			}
 		}
 	case "linux":
 		envlang, ok := os.LookupEnv("LANG")
 		if ok {
-			langLocRaw := strings.TrimSpace(envlang)
-			langLocRaw = strings.Split(envlang, ".")[0]
-			langLoc := strings.Split(langLocRaw, "_")
-			lang := langLoc[0]
-			loc := langLoc[1]
-			return lang, loc
+			if lang, loc, ok := splitLocale(strings.TrimSpace(envlang)); ok {
+				return lang, loc
+			}
 		}
 	}
 	return defaultLang, defaultLoc
+}
+
+func splitLocale(raw string) (string, string, bool) {
+	if raw == "" {
+		return "", "", false
+	}
+
+	raw = strings.TrimSpace(raw)
+	raw = strings.Split(raw, ".")[0]
+	raw = strings.Split(raw, "@")[0]
+	if raw == "" {
+		return "", "", false
+	}
+
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '_' || r == '-'
+	})
+	if len(parts) < 2 {
+		return "", "", false
+	}
+
+	lang := strings.TrimSpace(parts[0])
+	loc := strings.TrimSpace(parts[1])
+	if lang == "" || loc == "" {
+		return "", "", false
+	}
+
+	return lang, loc, true
 }
 
 func (g *Generator) transformValueNames(values []Value, transformMethods string) {
@@ -537,7 +566,7 @@ func (g *Generator) suffixValueNames(values []Value, suffix string) {
 // generate produces the String method for the named type.
 func (g *Generator) generate(
 	typeName string,
-	includeJSON, includeYAML, includeSQL, includeText, includeGQLGen bool,
+	includeJSON, includeYAML, includeSQL, includeText, includeGQLGen, sqlint bool,
 	transformMethod, trimPrefix, trimSuffix, addPrefix, addSuffix string,
 	lineComment, includeValuesMethod bool,
 ) {
@@ -570,6 +599,11 @@ func (g *Generator) generate(
 	g.prefixValueNames(values, addPrefix)
 
 	g.suffixValueNames(values, addSuffix)
+
+	values = mergeDuplicateValueAliases(values)
+	if err := validateParseKeys(values, typeName); err != nil {
+		log.Fatal(err)
+	}
 
 	runs := splitIntoRuns(values)
 	// The decision of which pattern to use depends on the number of
@@ -610,11 +644,73 @@ func (g *Generator) generate(
 		g.buildYAMLMethods(runs, typeName, runsThreshold)
 	}
 	if includeSQL {
-		g.addValueAndScanMethod(typeName)
+		g.addValueAndScanMethod(typeName, sqlint)
 	}
 	if includeGQLGen {
 		g.buildGQLGenMethods(runs, typeName)
 	}
+}
+
+func mergeDuplicateValueAliases(values []Value) []Value {
+	if len(values) == 0 {
+		return values
+	}
+
+	sort.Stable(byValue(values))
+	merged := values[:1]
+	for i := 1; i < len(values); i++ {
+		last := &merged[len(merged)-1]
+		if values[i].value == last.value {
+			last.aliases = append(last.aliases, values[i].aliases...)
+			continue
+		}
+		merged = append(merged, values[i])
+	}
+	return merged
+}
+
+func validateParseKeys(values []Value, typeName string) error {
+	owners := make(map[string]parseKeyOwner)
+	for _, value := range values {
+		if err := addParseKey(owners, typeName, value.originalName, "canonical", "canonical name", value.name); err != nil {
+			return err
+		}
+
+		aliasKeys := make(map[string]string)
+		for _, alias := range value.aliases {
+			normalized := strings.ToLower(alias)
+			if prior, ok := aliasKeys[normalized]; ok {
+				return fmt.Errorf("duplicate parse alias %q for %s: %s conflicts with %s", alias, typeName, value.originalName, prior)
+			}
+			aliasKeys[normalized] = value.originalName
+			if err := addParseKey(owners, typeName, value.originalName, "alias:"+normalized, "alias", alias); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func addParseKey(owners map[string]parseKeyOwner, typeName, constantName, source, kind, raw string) error {
+	for _, key := range uniqueParseKeys(raw) {
+		if prior, ok := owners[key]; ok {
+			if prior.constant == constantName && prior.source == source {
+				continue
+			}
+			return fmt.Errorf("duplicate parse token %q for %s: %s (%s) conflicts with %s (%s)", key, typeName, constantName, kind, prior.constant, prior.kind)
+		}
+		owners[key] = parseKeyOwner{constant: constantName, source: source, kind: kind}
+	}
+
+	return nil
+}
+
+func uniqueParseKeys(raw string) []string {
+	if lower := strings.ToLower(raw); lower != raw {
+		return []string{raw, lower}
+	}
+	return []string{raw}
 }
 
 // splitIntoRuns breaks the values into runs of contiguous sequences.
@@ -666,6 +762,7 @@ func (g *Generator) format() []byte {
 type Value struct {
 	originalName string // The name of the constant before transformation
 	name         string // The name of the constant after transformation (i.e. camel case => snake case)
+	aliases      []string
 	// The value is stored as a bit pattern alone. The boolean tells us
 	// whether to interpret it as an int64 or a uint64; the only place
 	// this matters is when sorting.
@@ -678,6 +775,14 @@ type Value struct {
 
 func (v *Value) String() string {
 	return v.str
+}
+
+const enumAliasDirective = "enumer:alias="
+
+type parseKeyOwner struct {
+	constant string
+	source   string
+	kind     string
 }
 
 // byValue lets us sort the constants into increasing order.
@@ -731,6 +836,10 @@ func (f *File) genDecl(node ast.Node) bool {
 		// We now have a list of names (from one line of source code) all being
 		// declared with the desired type.
 		// Grab their names and actual values and store them in f.values.
+		aliases, lineCommentName, err := parseValueSpecComments(vspec)
+		if err != nil {
+			log.Fatalf("invalid alias directive for type %s: %v", f.typeName, err)
+		}
 		for _, n := range vspec.Names {
 			if n.Name == "_" {
 				continue
@@ -761,18 +870,96 @@ func (f *File) genDecl(node ast.Node) bool {
 			v := Value{
 				originalName: n.Name,
 				name:         n.Name,
+				aliases:      append([]string(nil), aliases...),
 				value:        u64,
 				signed:       info&types.IsUnsigned == 0,
 				str:          value.String(),
 			}
-			if c := vspec.Comment; f.lineComment && c != nil && len(c.List) == 1 {
-				v.name = strings.TrimSpace(c.Text())
+			if f.lineComment && lineCommentName != "" {
+				v.name = lineCommentName
 			}
 
 			f.values = append(f.values, v)
 		}
 	}
 	return false
+}
+
+func parseValueSpecComments(vspec *ast.ValueSpec) ([]string, string, error) {
+	aliases := make([]string, 0)
+	aliases = append(aliases, parseAliasCommentGroup(vspec.Doc)...)
+	aliases = append(aliases, parseAliasCommentGroup(vspec.Comment)...)
+
+	lineCommentName, err := parseLineCommentName(vspec.Comment)
+	if err != nil {
+		return nil, "", err
+	}
+
+	for _, alias := range aliases {
+		if alias == "" {
+			return nil, "", fmt.Errorf("empty alias")
+		}
+	}
+
+	return aliases, lineCommentName, nil
+}
+
+func parseAliasCommentGroup(group *ast.CommentGroup) []string {
+	if group == nil {
+		return nil
+	}
+
+	var aliases []string
+	for _, comment := range group.List {
+		text := normalizeCommentText(comment.Text)
+		index := strings.Index(text, enumAliasDirective)
+		if index < 0 {
+			continue
+		}
+
+		directive := strings.TrimSpace(text[index+len(enumAliasDirective):])
+		if directive == "" {
+			aliases = append(aliases, "")
+			continue
+		}
+
+		for _, alias := range strings.Split(directive, ",") {
+			aliases = append(aliases, strings.TrimSpace(alias))
+		}
+	}
+
+	return aliases
+}
+
+func parseLineCommentName(group *ast.CommentGroup) (string, error) {
+	if group == nil || len(group.List) != 1 {
+		return "", nil
+	}
+
+	text := normalizeCommentText(group.List[0].Text)
+	index := strings.Index(text, enumAliasDirective)
+	if index < 0 {
+		return strings.TrimSpace(text), nil
+	}
+
+	if strings.TrimSpace(text[index+len(enumAliasDirective):]) == "" {
+		return "", fmt.Errorf("missing alias list after %q", enumAliasDirective)
+	}
+
+	display := strings.TrimSpace(text[:index])
+	display = strings.TrimSpace(strings.TrimSuffix(display, "//"))
+	return display, nil
+}
+
+func normalizeCommentText(text string) string {
+	switch {
+	case strings.HasPrefix(text, "//"):
+		return strings.TrimSpace(strings.TrimPrefix(text, "//"))
+	case strings.HasPrefix(text, "/*") && strings.HasSuffix(text, "*/"):
+		return strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "/*"), "*/"))
+	default:
+		return strings.TrimSpace(text)
+	}
 }
 
 // Helpers
