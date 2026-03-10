@@ -81,6 +81,9 @@ func TestEndToEnd(t *testing.T) {
 		var transformNameMethod string
 
 		switch name {
+		case "regexalias.go":
+			typeName = "RegexAlias"
+			transformNameMethod = "noop"
 		case "transform_map.go":
 			typeName = "MapValue"
 			transformNameMethod = `map:Male=XY,Female=XX,Unknown=XX|XY`

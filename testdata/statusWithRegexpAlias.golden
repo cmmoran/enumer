@@ -1,0 +1,110 @@
+
+const _StatusName = "StatusOpenStatusClosed"
+
+var _StatusIndex = [...]uint8{0, 10, 22}
+
+const _StatusLowerName = "statusopenstatusclosed"
+
+func (i Status) String() string {
+	if i < 0 || i >= Status(len(_StatusIndex)-1) {
+		return fmt.Sprintf("Status(%d)", i)
+	}
+	return _StatusName[_StatusIndex[i]:_StatusIndex[i+1]]
+}
+
+// An "invalid array index" compiler error signifies that the constant values have changed.
+// Re-run the stringer command to generate them again.
+func _StatusNoOp() {
+	var x [1]struct{}
+	_ = x[StatusOpen-(0)]
+	_ = x[StatusClosed-(1)]
+}
+
+var _StatusValues = []Status{StatusOpen, StatusClosed}
+
+var _StatusNameToValueMap = map[string]Status{
+	_StatusName[0:10]:       StatusOpen,
+	_StatusLowerName[0:10]:  StatusOpen,
+	"opened":                StatusOpen,
+	"o":                     StatusOpen,
+	_StatusName[10:22]:      StatusClosed,
+	_StatusLowerName[10:22]: StatusClosed,
+	"closed":                StatusClosed,
+	"c":                     StatusClosed,
+}
+
+var _StatusRegexpAliases = []struct {
+	pattern  *regexp.Regexp
+	value    Status
+	constant string
+}{
+	{pattern: regexp.MustCompile("^(?i:open(?:ed)?)$"), value: StatusOpen, constant: "StatusOpen"},
+	{pattern: regexp.MustCompile("^(?i:shut|close[d]?)$"), value: StatusClosed, constant: "StatusClosed"},
+}
+
+func _StatusRegexpAliasLookup(s string) (Status, bool, error) {
+	var zero Status
+	var matched Status
+	var matchedConstant string
+	matchedAny := false
+	for _, alias := range _StatusRegexpAliases {
+		if !alias.pattern.MatchString(s) {
+			continue
+		}
+		if matchedAny && matched != alias.value {
+			return zero, false, fmt.Errorf("%q matches multiple Status regexp aliases: %s and %s", s, matchedConstant, alias.constant)
+		}
+		matched = alias.value
+		matchedConstant = alias.constant
+		matchedAny = true
+	}
+	if matchedAny {
+		return matched, true, nil
+	}
+	return zero, false, nil
+}
+
+var _StatusNames = []string{
+	_StatusName[0:10],
+	_StatusName[10:22],
+}
+
+// StatusString retrieves an enum value from the enum constants string name.
+// Throws an error if the param is not part of the enum.
+func StatusString(s string) (Status, error) {
+	if val, ok := _StatusNameToValueMap[s]; ok {
+		return val, nil
+	}
+
+	if val, ok := _StatusNameToValueMap[strings.ToLower(s)]; ok {
+		return val, nil
+	}
+	if val, ok, err := _StatusRegexpAliasLookup(s); err != nil {
+		return 0, err
+	} else if ok {
+		return val, nil
+	}
+	return 0, fmt.Errorf("%s does not belong to Status values", s)
+}
+
+// StatusValues returns all values of the enum
+func StatusValues() []Status {
+	return _StatusValues
+}
+
+// StatusStrings returns a slice of all String values of the enum
+func StatusStrings() []string {
+	strs := make([]string, len(_StatusNames))
+	copy(strs, _StatusNames)
+	return strs
+}
+
+// IsAStatus returns "true" if the value is listed in the enum definition. "false" otherwise
+func (i Status) IsAStatus() bool {
+	for _, v := range _StatusValues {
+		if i == v {
+			return true
+		}
+	}
+	return false
+}

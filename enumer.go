@@ -25,6 +25,28 @@ func %[1]sString(s string) (%[1]s, error) {
 // Arguments to format are:
 //
 //	[1]: type name
+const stringNameToValueMethodRegexp = `// %[1]sString retrieves an enum value from the enum constants string name.
+// Throws an error if the param is not part of the enum.
+func %[1]sString(s string) (%[1]s, error) {
+	if val, ok := _%[1]sNameToValueMap[s]; ok {
+		return val, nil
+	}
+
+	if val, ok := _%[1]sNameToValueMap[strings.ToLower(s)]; ok {
+		return val, nil
+	}
+	if val, ok, err := _%[1]sRegexpAliasLookup(s); err != nil {
+		return 0, err
+	} else if ok {
+		return val, nil
+	}
+	return 0, fmt.Errorf("%%s does not belong to %[1]s values", s)
+}
+`
+
+// Arguments to format are:
+//
+//	[1]: type name
 const stringValuesMethod = `// %[1]sValues returns all values of the enum
 func %[1]sValues() []%[1]s {
 	return _%[1]sValues
@@ -93,12 +115,20 @@ func (g *Generator) buildBasicExtras(runs [][]Value, typeName string, runsThresh
 
 	// Print the map between name and value
 	g.printValueMap(runs, typeName, runsThreshold)
+	hasRegexpAliases := hasRegexpAliases(runs)
+	if hasRegexpAliases {
+		g.printRegexpValueMatchers(runs, typeName)
+	}
 
 	// Print the slice of names
 	g.printNamesSlice(runs, typeName, runsThreshold)
 
 	// Print the basic extra methods
-	g.Printf(stringNameToValueMethod, typeName)
+	if hasRegexpAliases {
+		g.Printf(stringNameToValueMethodRegexp, typeName)
+	} else {
+		g.Printf(stringNameToValueMethod, typeName)
+	}
 	g.Printf(stringValuesMethod, typeName)
 	g.Printf(stringsMethod, typeName)
 	if len(runs) <= runsThreshold {
@@ -136,6 +166,56 @@ func (g *Generator) printValueMap(runs [][]Value, typeName string, runsThreshold
 	}
 	g.Printf("}\n\n")
 }
+
+func (g *Generator) printRegexpValueMatchers(runs [][]Value, typeName string) {
+	g.Printf("var _%sRegexpAliases = []struct {\n", typeName)
+	g.Printf("\tpattern *regexp.Regexp\n")
+	g.Printf("\tvalue %s\n", typeName)
+	g.Printf("\tconstant string\n")
+	g.Printf("}{\n")
+	for _, values := range runs {
+		for _, value := range values {
+			for _, alias := range value.regexAliases {
+				g.Printf("\t{pattern: regexp.MustCompile(%q), value: %s, constant: %q},\n", alias, value.originalName, value.originalName)
+			}
+		}
+	}
+	g.Printf("}\n\n")
+
+	g.Printf("func _%sRegexpAliasLookup(s string) (%s, bool, error) {\n", typeName, typeName)
+	g.Printf("\tvar zero %s\n", typeName)
+	g.Printf("\tvar matched %s\n", typeName)
+	g.Printf("\tvar matchedConstant string\n")
+	g.Printf("\tmatchedAny := false\n")
+	g.Printf("\tfor _, alias := range _%sRegexpAliases {\n", typeName)
+	g.Printf("\t\tif !alias.pattern.MatchString(s) {\n")
+	g.Printf("\t\t\tcontinue\n")
+	g.Printf("\t\t}\n")
+	g.Printf("\t\tif matchedAny && matched != alias.value {\n")
+	g.Printf("\t\t\treturn zero, false, fmt.Errorf(\"%%q matches multiple %s regexp aliases: %%s and %%s\", s, matchedConstant, alias.constant)\n", typeName)
+	g.Printf("\t\t}\n")
+	g.Printf("\t\tmatched = alias.value\n")
+	g.Printf("\t\tmatchedConstant = alias.constant\n")
+	g.Printf("\t\tmatchedAny = true\n")
+	g.Printf("\t}\n")
+	g.Printf("\tif matchedAny {\n")
+	g.Printf("\t\treturn matched, true, nil\n")
+	g.Printf("\t}\n")
+	g.Printf("\treturn zero, false, nil\n")
+	g.Printf("}\n\n")
+}
+
+func hasRegexpAliases(runs [][]Value) bool {
+	for _, values := range runs {
+		for _, value := range values {
+			if len(value.regexAliases) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (g *Generator) printNamesSlice(runs [][]Value, typeName string, runsThreshold int) {
 	thereAreRuns := len(runs) > 1 && len(runs) <= runsThreshold
 	g.Printf("\nvar _%sNames = []string{\n", typeName)

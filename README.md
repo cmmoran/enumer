@@ -173,6 +173,15 @@ const (
 )
 ```
 
+Regexp aliases are declared with a separate directive:
+
+```go
+const (
+	StatusOpen Status = iota //enumer:aliasregexp=^(?i:open(?:ed)?)$
+	StatusClosed             //enumer:aliasregexp=^(?i:shut|close[d]?)$
+)
+```
+
 With the definition above, all of the following resolve successfully:
 
 ```go
@@ -188,6 +197,8 @@ status, _ = StatusString("O")
 - `String()` still returns the canonical enum string only.
 - `<Type>Strings()` still returns canonical strings only.
 - Aliases are matched the same way canonical strings are matched: exact first, then case-insensitive via lowercase lookup.
+- Regexp aliases run only after canonical-name and literal-alias lookups fail.
+- Regexp aliases use Go's `regexp` syntax exactly as written. If you want case-insensitive matching, include `(?i)` in the pattern.
 - Aliases are explicit. They are not transformed by `-transform`, `-trimprefix`, `-trimsuffix`, `-addprefix`, or `-addsuffix`.
 
 ### Directive syntax
@@ -198,11 +209,19 @@ The directive format is:
 //enumer:alias=value0,value1,value2
 ```
 
+Regexp alias directives use:
+
+```go
+//enumer:aliasregexp=^value(?:0|1|2)$
+```
+
 Rules:
 
 - Aliases are comma-separated.
 - Surrounding whitespace is trimmed.
 - Empty aliases are invalid.
+- Regexp aliases consume the rest of the directive value verbatim.
+- Invalid regexp patterns are rejected by the generator.
 - Alias directives may be placed in doc comments or line comments attached to the enum constant.
 
 Example with a doc comment:
@@ -243,6 +262,7 @@ The following collisions are invalid:
 - alias vs canonical name of another constant
 - alias vs canonical lowercase name of another constant
 - duplicate aliases on the same constant after normalization
+- regexp alias vs canonical or literal parse token of another constant
 
 Example:
 
@@ -259,6 +279,8 @@ Enumer enforces this in two ways:
 
 - The generator validates parse-token collisions and fails with a descriptive error.
 - The generated `map[string]T` contains explicit alias entries, so duplicate keys still fail at compile time if validation ever misses a case.
+
+Regexp aliases are also checked against canonical names and literal aliases. Ambiguity between two regexp aliases is resolved at parse time: if the same input matches regexp aliases for different constants, the generated parser returns an error.
 
 ## SQL and `sql:int`
 

@@ -92,6 +92,10 @@ var goldenLinecommentAliases = []Golden{
 	{"statusWithLinecommentAlias", statusWithLinecommentAliasIn},
 }
 
+var goldenRegexpAliases = []Golden{
+	{"statusWithRegexpAlias", statusWithRegexpAliasIn},
+}
+
 // Each example starts with "type XXX [u]int", with a single space separating them.
 
 // Simple test: enumeration of type int starting at 0.
@@ -348,6 +352,13 @@ const (
 )
 `
 
+const statusWithRegexpAliasIn = `type Status int
+const (
+	StatusOpen Status = iota //enumer:alias=opened,o //enumer:aliasregexp=^(?i:open(?:ed)?)$
+	StatusClosed             //enumer:alias=closed,c //enumer:aliasregexp=^(?i:shut|close[d]?)$
+)
+`
+
 func TestGolden(t *testing.T) {
 	for _, test := range golden {
 		runGoldenTest(t, test, false, false, false, false, false, false, true, false, "", "", "", "")
@@ -397,6 +408,9 @@ func TestGolden(t *testing.T) {
 	}
 	for _, test := range goldenLinecommentAliases {
 		runGoldenTest(t, test, false, false, false, false, true, false, false, false, "", "", "", "")
+	}
+	for _, test := range goldenRegexpAliases {
+		runGoldenTest(t, test, false, false, false, false, false, false, false, false, "", "", "", "")
 	}
 }
 

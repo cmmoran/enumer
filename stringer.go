@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -135,6 +136,9 @@ func main() {
 	g.Printf("\n")
 	g.Printf("import (\n")
 	g.Printf("\t\"fmt\"\n")
+	if g.typeNamesNeedRegexpAliases(typs) {
+		g.Printf("\t\"regexp\"\n")
+	}
 	g.Printf("\t\"strings\"\n")
 	if *sqlint && !*sql {
 		*sql = true
@@ -662,6 +666,7 @@ func mergeDuplicateValueAliases(values []Value) []Value {
 		last := &merged[len(merged)-1]
 		if values[i].value == last.value {
 			last.aliases = append(last.aliases, values[i].aliases...)
+			last.regexAliases = append(last.regexAliases, values[i].regexAliases...)
 			continue
 		}
 		merged = append(merged, values[i])
@@ -689,6 +694,24 @@ func validateParseKeys(values []Value, typeName string) error {
 		}
 	}
 
+	for _, value := range values {
+		for _, regexAlias := range value.regexAliases {
+			re, err := regexp.Compile(regexAlias)
+			if err != nil {
+				return fmt.Errorf("invalid regexp parse alias %q for %s: %w", regexAlias, typeName, err)
+			}
+			for key, prior := range owners {
+				if !re.MatchString(key) {
+					continue
+				}
+				if prior.constant == value.originalName {
+					continue
+				}
+				return fmt.Errorf("regexp parse alias %q for %s: %s conflicts with %s (%s)", regexAlias, typeName, value.originalName, prior.constant, key)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -711,6 +734,52 @@ func uniqueParseKeys(raw string) []string {
 		return []string{raw, lower}
 	}
 	return []string{raw}
+}
+
+func (g *Generator) typeNamesNeedRegexpAliases(typeNames []string) bool {
+	targets := make(map[string]struct{}, len(typeNames))
+	for _, typeName := range typeNames {
+		targets[typeName] = struct{}{}
+	}
+
+	for _, file := range g.pkg.files {
+		for _, decl := range file.file.Decls {
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok || genDecl.Tok != token.CONST {
+				continue
+			}
+
+			typ := ""
+			for _, spec := range genDecl.Specs {
+				vspec := spec.(*ast.ValueSpec)
+				if vspec.Type == nil && len(vspec.Values) > 0 {
+					typ = ""
+					continue
+				}
+				if vspec.Type != nil {
+					ident, ok := vspec.Type.(*ast.Ident)
+					if !ok {
+						typ = ""
+						continue
+					}
+					typ = ident.Name
+				}
+				if _, ok := targets[typ]; !ok {
+					continue
+				}
+
+				_, regexAliases, _, err := parseValueSpecComments(vspec)
+				if err != nil {
+					log.Fatalf("invalid alias directive for type %s: %v", typ, err)
+				}
+				if len(regexAliases) > 0 {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 // splitIntoRuns breaks the values into runs of contiguous sequences.
@@ -763,6 +832,7 @@ type Value struct {
 	originalName string // The name of the constant before transformation
 	name         string // The name of the constant after transformation (i.e. camel case => snake case)
 	aliases      []string
+	regexAliases []string
 	// The value is stored as a bit pattern alone. The boolean tells us
 	// whether to interpret it as an int64 or a uint64; the only place
 	// this matters is when sorting.
@@ -778,6 +848,7 @@ func (v *Value) String() string {
 }
 
 const enumAliasDirective = "enumer:alias="
+const enumAliasRegexpDirective = "enumer:aliasregexp="
 
 type parseKeyOwner struct {
 	constant string
@@ -836,7 +907,7 @@ func (f *File) genDecl(node ast.Node) bool {
 		// We now have a list of names (from one line of source code) all being
 		// declared with the desired type.
 		// Grab their names and actual values and store them in f.values.
-		aliases, lineCommentName, err := parseValueSpecComments(vspec)
+		aliases, regexAliases, lineCommentName, err := parseValueSpecComments(vspec)
 		if err != nil {
 			log.Fatalf("invalid alias directive for type %s: %v", f.typeName, err)
 		}
@@ -871,6 +942,7 @@ func (f *File) genDecl(node ast.Node) bool {
 				originalName: n.Name,
 				name:         n.Name,
 				aliases:      append([]string(nil), aliases...),
+				regexAliases: append([]string(nil), regexAliases...),
 				value:        u64,
 				signed:       info&types.IsUnsigned == 0,
 				str:          value.String(),
@@ -885,50 +957,58 @@ func (f *File) genDecl(node ast.Node) bool {
 	return false
 }
 
-func parseValueSpecComments(vspec *ast.ValueSpec) ([]string, string, error) {
+func parseValueSpecComments(vspec *ast.ValueSpec) ([]string, []string, string, error) {
 	aliases := make([]string, 0)
-	aliases = append(aliases, parseAliasCommentGroup(vspec.Doc)...)
-	aliases = append(aliases, parseAliasCommentGroup(vspec.Comment)...)
+	regexAliases := make([]string, 0)
+	docAliases, docRegexAliases, err := parseAliasCommentGroup(vspec.Doc)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	commentAliases, commentRegexAliases, err := parseAliasCommentGroup(vspec.Comment)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	aliases = append(aliases, docAliases...)
+	aliases = append(aliases, commentAliases...)
+	regexAliases = append(regexAliases, docRegexAliases...)
+	regexAliases = append(regexAliases, commentRegexAliases...)
 
 	lineCommentName, err := parseLineCommentName(vspec.Comment)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 
 	for _, alias := range aliases {
 		if alias == "" {
-			return nil, "", fmt.Errorf("empty alias")
+			return nil, nil, "", fmt.Errorf("empty alias")
+		}
+	}
+	for _, alias := range regexAliases {
+		if alias == "" {
+			return nil, nil, "", fmt.Errorf("empty regexp alias")
 		}
 	}
 
-	return aliases, lineCommentName, nil
+	return aliases, regexAliases, lineCommentName, nil
 }
 
-func parseAliasCommentGroup(group *ast.CommentGroup) []string {
+func parseAliasCommentGroup(group *ast.CommentGroup) ([]string, []string, error) {
 	if group == nil {
-		return nil
+		return nil, nil, nil
 	}
 
 	var aliases []string
+	var regexAliases []string
 	for _, comment := range group.List {
-		text := normalizeCommentText(comment.Text)
-		index := strings.Index(text, enumAliasDirective)
-		if index < 0 {
-			continue
+		commentAliases, commentRegexAliases, _, err := parseCommentDirectives(normalizeCommentText(comment.Text))
+		if err != nil {
+			return nil, nil, err
 		}
-
-		directive := strings.TrimSpace(text[index+len(enumAliasDirective):])
-		if directive == "" {
-			aliases = append(aliases, "")
-			continue
-		}
-
-		for _, alias := range strings.Split(directive, ",") {
-			aliases = append(aliases, strings.TrimSpace(alias))
-		}
+		aliases = append(aliases, commentAliases...)
+		regexAliases = append(regexAliases, commentRegexAliases...)
 	}
 
-	return aliases
+	return aliases, regexAliases, nil
 }
 
 func parseLineCommentName(group *ast.CommentGroup) (string, error) {
@@ -937,18 +1017,78 @@ func parseLineCommentName(group *ast.CommentGroup) (string, error) {
 	}
 
 	text := normalizeCommentText(group.List[0].Text)
-	index := strings.Index(text, enumAliasDirective)
+	_, _, index, err := parseCommentDirectives(text)
+	if err != nil {
+		return "", err
+	}
 	if index < 0 {
 		return strings.TrimSpace(text), nil
-	}
-
-	if strings.TrimSpace(text[index+len(enumAliasDirective):]) == "" {
-		return "", fmt.Errorf("missing alias list after %q", enumAliasDirective)
 	}
 
 	display := strings.TrimSpace(text[:index])
 	display = strings.TrimSpace(strings.TrimSuffix(display, "//"))
 	return display, nil
+}
+
+func parseCommentDirectives(text string) ([]string, []string, int, error) {
+	segments, firstDirectiveIndex := enumerDirectiveSegments(text)
+	if len(segments) == 0 {
+		return nil, nil, -1, nil
+	}
+
+	var aliases []string
+	var regexAliases []string
+	for _, segment := range segments {
+		switch {
+		case strings.HasPrefix(segment, enumAliasDirective):
+			directive := strings.TrimSpace(segment[len(enumAliasDirective):])
+			if directive == "" {
+				return nil, nil, firstDirectiveIndex, fmt.Errorf("missing alias list after %q", enumAliasDirective)
+			}
+			for _, alias := range strings.Split(directive, ",") {
+				aliases = append(aliases, strings.TrimSpace(alias))
+			}
+		case strings.HasPrefix(segment, enumAliasRegexpDirective):
+			directive := strings.TrimSpace(segment[len(enumAliasRegexpDirective):])
+			if directive == "" {
+				return nil, nil, firstDirectiveIndex, fmt.Errorf("missing regexp alias after %q", enumAliasRegexpDirective)
+			}
+			regexAliases = append(regexAliases, directive)
+		}
+	}
+
+	return aliases, regexAliases, firstDirectiveIndex, nil
+}
+
+func enumerDirectiveSegments(text string) ([]string, int) {
+	var segments []string
+	firstDirectiveIndex := -1
+
+	searchFrom := 0
+	for {
+		index := strings.Index(text[searchFrom:], "enumer:")
+		if index < 0 {
+			break
+		}
+		index += searchFrom
+		if firstDirectiveIndex < 0 {
+			firstDirectiveIndex = index
+		}
+
+		nextIndex := strings.Index(text[index+len("enumer:"):], "enumer:")
+		end := len(text)
+		if nextIndex >= 0 {
+			end = index + len("enumer:") + nextIndex
+		}
+
+		segment := strings.TrimSpace(text[index:end])
+		segment = strings.TrimSpace(strings.TrimSuffix(segment, "//"))
+		segment = strings.TrimLeft(segment, "/ ")
+		segments = append(segments, segment)
+		searchFrom = end
+	}
+
+	return segments, firstDirectiveIndex
 }
 
 func normalizeCommentText(text string) string {
