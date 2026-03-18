@@ -90,6 +90,7 @@ var goldenLinecomment = []Golden{
 
 var goldenLinecommentAliases = []Golden{
 	{"statusWithLinecommentAlias", statusWithLinecommentAliasIn},
+	{"statusWithLinecommentRegexpAlias", statusWithLinecommentRegexpAliasIn},
 }
 
 var goldenRegexpAliases = []Golden{
@@ -355,6 +356,13 @@ const (
 const statusWithRegexpAliasIn = `type Status int
 const (
 	StatusOpen Status = iota //enumer:alias=opened,o //enumer:aliasregexp=^(?i:open(?:ed)?)$
+	StatusClosed             //enumer:alias=closed,c //enumer:aliasregexp=^(?i:shut|close[d]?)$
+)
+`
+
+const statusWithLinecommentRegexpAliasIn = `type Status int
+const (
+	StatusOpen Status = iota // OpenSaysMe //enumer:alias=opened,o //enumer:aliasregexp=^(?i:open(?:ed)?)$
 	StatusClosed             //enumer:alias=closed,c //enumer:aliasregexp=^(?i:shut|close[d]?)$
 )
 `
